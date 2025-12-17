@@ -5,6 +5,7 @@
 # Color codes
 RED='\033[0;31m'
 YELLOW='\033[1;33m'
+ORANGE='\033[38;5;208m'
 GREEN='\033[0;32m'
 BLUE='\033[0;34m'
 CYAN='\033[0;36m'
@@ -65,6 +66,74 @@ convert_to_mb() {
     esac
 }
 
+# Function to format grace period with units
+format_grace_period() {
+    local grace=$1
+    
+    # Check for special cases
+    if [[ "$grace" == "none" ]] || [[ "$grace" =~ expired ]] || [[ "$grace" =~ ^0 ]]; then
+        echo "$grace"
+        return
+    fi
+    
+    # Handle format like "43:26" (hours:minutes)
+    if [[ "$grace" =~ ^[0-9]+:[0-9]+$ ]]; then
+        local hours=$(echo "$grace" | cut -d: -f1)
+        local mins=$(echo "$grace" | cut -d: -f2)
+        
+        # Convert to days if hours >= 24
+        if [ "$hours" -ge 24 ]; then
+            local days=$((hours / 24))
+            local remaining_hours=$((hours % 24))
+            local day_word="days"
+            local hour_word="hours"
+            [ "$days" -eq 1 ] && day_word="day"
+            [ "$remaining_hours" -eq 1 ] && hour_word="hour"
+            
+            if [ "$remaining_hours" -eq 0 ]; then
+                echo "${days} ${day_word}, ${mins} minutes"
+            else
+                echo "${days} ${day_word}, ${remaining_hours} ${hour_word}, ${mins} minutes"
+            fi
+        else
+            local hour_word="hours"
+            [ "$hours" -eq 1 ] && hour_word="hour"
+            echo "${hours} ${hour_word}, ${mins} minutes"
+        fi
+        return
+    fi
+    
+    # Handle format like "6days"
+    if [[ "$grace" =~ ^([0-9]+)(days?)$ ]]; then
+        local num="${BASH_REMATCH[1]}"
+        local day_word="days"
+        [ "$num" -eq 1 ] && day_word="day"
+        echo "$num ${day_word}"
+        return
+    fi
+    
+    # Handle format like "12hours"
+    if [[ "$grace" =~ ^([0-9]+)(hours?)$ ]]; then
+        local num="${BASH_REMATCH[1]}"
+        local hour_word="hours"
+        [ "$num" -eq 1 ] && hour_word="hour"
+        echo "$num ${hour_word}"
+        return
+    fi
+    
+    # Handle format like "30minutes" or "30mins"
+    if [[ "$grace" =~ ^([0-9]+)(minutes?|mins?)$ ]]; then
+        local num="${BASH_REMATCH[1]}"
+        local min_word="minutes"
+        [ "$num" -eq 1 ] && min_word="minute"
+        echo "$num ${min_word}"
+        return
+    fi
+    
+    # If format is not recognized, just add space between number and letters
+    echo "$grace" | sed 's/\([0-9]\)\([a-zA-Z]\)/\1 \2/'
+}
+
 # Function to draw a usage bar
 draw_bar() {
     local used=$1
@@ -81,10 +150,10 @@ draw_bar() {
     
     # Determine color based on usage
     local color=$GREEN
-    if (( $(echo "$pct_soft >= 90" | bc -l) )); then
+    if (( $(echo "$pct_soft >= 100" | bc -l) )); then
         color=$RED
     elif (( $(echo "$pct_soft >= 75" | bc -l) )); then
-        color=$YELLOW
+        color=$ORANGE
     fi
     
     # Calculate bar segments
@@ -98,17 +167,20 @@ draw_bar() {
     # Build the bar
     echo -n "  "
     for ((i=0; i<$bar_width; i++)); do
-        if [ $i -lt $used_chars ]; then
+        if [ $i -eq $soft_pos ] && [ $i -lt $used_chars ]; then
+            # Soft limit position is within the used portion - make it stand out
+            echo -n -e "${YELLOW}┃${NC}"
+        elif [ $i -lt $used_chars ]; then
             echo -n -e "${color}█${NC}"
         elif [ $i -eq $soft_pos ]; then
-            echo -n -e "${YELLOW}|${NC}"
+            echo -n -e "${YELLOW}┃${NC}"
         else
             echo -n "░"
         fi
     done
     
     # Add red hard limit marker at the end of the bar
-    echo -n -e "${RED}|${NC}"
+    echo -n -e "${RED}┃${NC}"
     
     # Print usage statistics
     echo -e " ${pct_soft}% of soft limit (${pct_hard}% of hard limit)"
@@ -169,13 +241,12 @@ parse_and_display() {
         # Display grace period if present
         if [ ! -z "$grace" ]; then
             if [[ "$grace" == "none" ]]; then
-                echo -e "  ${RED}▲ Hard limit reached - no grace period${NC}"
+                echo -e "  ${RED}⚠ Hard limit reached - no grace period${NC}"
             elif [[ "$grace" =~ expired ]] || [[ "$grace" =~ ^0 ]]; then
-                echo -e "  ${RED}▲ Grace period expired${NC}"
+                echo -e "  ${RED}⚠ Grace period expired${NC}"
             elif [[ "$grace" =~ [a-zA-Z] ]] || [[ "$grace" =~ [0-9] ]]; then
-                # Format grace period: "6days" -> "6 days"
-                local formatted_grace=$(echo "$grace" | sed 's/\([0-9]\)\([a-zA-Z]\)/\1 \2/')
-                echo -e "  ${YELLOW}▲ Grace period:${NC} $formatted_grace remaining"
+                local formatted_grace=$(format_grace_period "$grace")
+                echo -e "  ${YELLOW}⚠ Grace period:${NC} $formatted_grace remaining"
             fi
         fi
     fi
@@ -197,13 +268,12 @@ parse_and_display() {
             # Display files grace period if present
             if [ ! -z "$files_grace" ]; then
                 if [[ "$files_grace" == "none" ]]; then
-                    echo -e "  ${RED}▲ Hard limit reached - no grace period${NC}"
+                    echo -e "  ${RED}⚠ Hard limit reached - no grace period${NC}"
                 elif [[ "$files_grace" =~ expired ]] || [[ "$files_grace" =~ ^0 ]]; then
-                    echo -e "  ${RED}▲ Grace period expired${NC}"
+                    echo -e "  ${RED}⚠ Grace period expired${NC}"
                 elif [[ "$files_grace" =~ [a-zA-Z] ]] || [[ "$files_grace" =~ [0-9] ]]; then
-                    # Format grace period: "6days" -> "6 days"
-                    local formatted_files_grace=$(echo "$files_grace" | sed 's/\([0-9]\)\([a-zA-Z]\)/\1 \2/')
-                    echo -e "  ${YELLOW}▲ Grace period:${NC} $formatted_files_grace remaining"
+                    local formatted_files_grace=$(format_grace_period "$files_grace")
+                    echo -e "  ${YELLOW}⚠ Grace period:${NC} $formatted_files_grace remaining"
                 fi
             fi
         fi
@@ -337,5 +407,7 @@ if [ -d "/mnt/fastscratch2/users/$uname" ]; then
 fi
 
 echo ""
-echo -e "${BOLD}Legend:${NC} ${GREEN}█${NC} Used space  ${YELLOW}|${NC} Soft limit  ${RED}|${NC} Hard limit  ░ Available"
+echo -e "${BOLD}Legend:${NC} ${GREEN}█${NC} Used space  ${YELLOW}┃${NC} Soft limit  ${RED}┃${NC} Hard limit  ░ Available"
+echo -e "         ${GREEN}█${NC} < 75% of soft  ${ORANGE}█${NC} 75-99% of soft  ${RED}█${NC} ≥ 100% of soft (exceeded)"
+echo -e "         Grace periods are 7 days, unless otherwise specified."
 echo ""
