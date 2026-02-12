@@ -1,6 +1,7 @@
 #!/bin/bash
 # Enhanced disk usage quotas display with visual ASCII bars
 # B.Pietras, University of Liverpool, Research IT. 15/12/25.
+# Run on any node of barkla2
 
 # Color codes
 RED='\033[0;31m'
@@ -11,6 +12,7 @@ BLUE='\033[0;34m'
 CYAN='\033[0;36m'
 NC='\033[0m' # No Color
 BOLD='\033[1m'
+BOLD_RED='\033[1;31m'
 
 msg="\
 Usage: $(basename $0) [user]
@@ -134,6 +136,94 @@ format_grace_period() {
     echo "$grace" | sed 's/\([0-9]\)\([a-zA-Z]\)/\1 \2/'
 }
 
+# Function to check if quotas match defaults
+check_default_quotas() {
+    local filesystem=$1
+    local quota=$2
+    local limit=$3
+    local files_quota=$4
+    local files_limit=$5
+    
+    local is_default_space=false
+    local is_default_files=false
+    
+    # Check based on filesystem
+    if [[ "$filesystem" =~ /export/data ]]; then
+        # data1/data3 defaults: 2500G soft / 3000G hard, 300k/500k files
+        # Convert to MB for comparison (2500G = 2560000M, 3000G = 3072000M)
+        local quota_mb=$(convert_to_mb "$quota")
+        local limit_mb=$(convert_to_mb "$limit")
+        
+        # Allow small rounding differences (within 1%)
+        if (( $(echo "$quota_mb >= 2560000 * 0.99 && $quota_mb <= 2560000 * 1.01" | bc -l) )) && \
+           (( $(echo "$limit_mb >= 3072000 * 0.99 && $limit_mb <= 3072000 * 1.01" | bc -l) )); then
+            is_default_space=true
+        fi
+        
+        # Convert file quotas (300k = 300000, 500k = 500000)
+        local files_quota_num=$(convert_to_number "$files_quota")
+        local files_limit_num=$(convert_to_number "$files_limit")
+        [[ "$files_quota_num" == "300000" && "$files_limit_num" == "500000" ]] && is_default_files=true
+        
+    elif [[ "$filesystem" =~ /export/users ]]; then
+        # users defaults: 75000M soft / 100000M hard, 100k/150k files
+        local quota_mb=$(convert_to_mb "$quota")
+        local limit_mb=$(convert_to_mb "$limit")
+        
+        # Allow small rounding differences (within 1%)
+        if (( $(echo "$quota_mb >= 75000 * 0.99 && $quota_mb <= 75000 * 1.01" | bc -l) )) && \
+           (( $(echo "$limit_mb >= 100000 * 0.99 && $limit_mb <= 100000 * 1.01" | bc -l) )); then
+            is_default_space=true
+        fi
+        
+        local files_quota_num=$(convert_to_number "$files_quota")
+        local files_limit_num=$(convert_to_number "$files_limit")
+        [[ "$files_quota_num" == "100000" && "$files_limit_num" == "150000" ]] && is_default_files=true
+        
+    elif [[ "$filesystem" =~ /mnt/scratch ]]; then
+        # /mnt/scratch defaults: 2.0T soft / 2.5T hard, 300k/500k files
+        # Convert quota values to MB for comparison (2T = 2097152M, 2.5T = 2621440M)
+        local quota_mb=$(convert_to_mb "$quota")
+        local limit_mb=$(convert_to_mb "$limit")
+        
+        # Allow small rounding differences (within 1%)
+        if (( $(echo "$quota_mb >= 2097152 * 0.99 && $quota_mb <= 2097152 * 1.01" | bc -l) )) && \
+           (( $(echo "$limit_mb >= 2621440 * 0.99 && $limit_mb <= 2621440 * 1.01" | bc -l) )); then
+            is_default_space=true
+        fi
+        
+        local files_quota_num=$(convert_to_number "$files_quota")
+        local files_limit_num=$(convert_to_number "$files_limit")
+        [[ "$files_quota_num" == "300000" && "$files_limit_num" == "500000" ]] && is_default_files=true
+        
+    elif [[ "$filesystem" =~ /mnt/fastscratch ]]; then
+        # /mnt/fastscratch defaults: 500G soft / 750G hard, 500k/700k files
+        # Convert to MB for comparison (500G = 512000M, 750G = 768000M)
+        local quota_mb=$(convert_to_mb "$quota")
+        local limit_mb=$(convert_to_mb "$limit")
+        
+        # Allow small rounding differences (within 1%)
+        if (( $(echo "$quota_mb >= 512000 * 0.99 && $quota_mb <= 512000 * 1.01" | bc -l) )) && \
+           (( $(echo "$limit_mb >= 768000 * 0.99 && $limit_mb <= 768000 * 1.01" | bc -l) )); then
+            is_default_space=true
+        fi
+        
+        local files_quota_num=$(convert_to_number "$files_quota")
+        local files_limit_num=$(convert_to_number "$files_limit")
+        [[ "$files_quota_num" == "500000" && "$files_limit_num" == "700000" ]] && is_default_files=true
+    fi
+    
+    if $is_default_space && $is_default_files; then
+        echo "both"
+    elif $is_default_space; then
+        echo "space"
+    elif $is_default_files; then
+        echo "files"
+    else
+        echo "custom"
+    fi
+}
+
 # Function to draw a usage bar
 draw_bar() {
     local used=$1
@@ -142,6 +232,7 @@ draw_bar() {
     local label=$4
     local soft_label=$5
     local hard_label=$6
+    local grace=$7
     local bar_width=50
     
     # Calculate percentages
@@ -150,9 +241,33 @@ draw_bar() {
     
     # Determine color based on usage
     local color=$GREEN
+    
+    # Check if grace period expired or none (soft limit exceeded with no grace)
+    local grace_expired=false
+    local soft_exceeded=false
+    
+    # Check if soft limit is exceeded
     if (( $(echo "$pct_soft >= 100" | bc -l) )); then
+        soft_exceeded=true
+    fi
+    
+    # Determine if grace is expired
+    # Empty grace when soft limit exceeded means grace expired (Lustre often doesn't report grace)
+    if [[ "$grace" == "none" ]] || [[ "$grace" =~ expired ]] || [[ "$grace" =~ ^0 ]]; then
+        grace_expired=true
+    elif [ -z "$grace" ] && $soft_exceeded; then
+        # Empty grace with soft limit exceeded - treat as expired
+        grace_expired=true
+    fi
+    
+    if (( $(echo "$pct_hard >= 100" | bc -l) )); then
+        # Hard limit reached - use red
+        color=$RED
+    elif $soft_exceeded && $grace_expired; then
+        # Soft limit exceeded and grace expired - use red
         color=$RED
     elif (( $(echo "$pct_soft >= 75" | bc -l) )); then
+        # Over 75% of soft limit - use orange
         color=$ORANGE
     fi
     
@@ -220,10 +335,22 @@ parse_and_display() {
     local files=$5
     local files_quota=$6
     local files_limit=$7
-    local grace=$8
-    local files_grace=$9
+    local grace=${8:-}
+    local files_grace=${9:-}
     
     echo -e "\n${BOLD}${BLUE}Filesystem: $filesystem${NC}"
+    
+    # Check if using default quotas
+    local quota_type=$(check_default_quotas "$filesystem" "$quota" "$limit" "$files_quota" "$files_limit")
+    if [[ "$quota_type" == "both" ]]; then
+        echo -e "  ${CYAN}Using default quotas (space & files)${NC}"
+    elif [[ "$quota_type" == "space" ]]; then
+        echo -e "  ${CYAN}Using default space quota${NC} | Custom file quota"
+    elif [[ "$quota_type" == "files" ]]; then
+        echo -e "  Custom space quota | ${CYAN}Using default file quota${NC}"
+    else
+        echo -e "  ${GREEN}Custom quotas configured${NC}"
+    fi
     
     # Convert to MB for comparison
     local used_mb=$(convert_to_mb "$used")
@@ -236,18 +363,27 @@ parse_and_display() {
         local used_fmt=$(format_size_mb "$used_mb")
         local soft_fmt=$(format_size_mb "$quota_mb")
         local hard_fmt=$(format_size_mb "$limit_mb")
-        draw_bar "$used_mb" "$quota_mb" "$limit_mb" "$used_fmt" "$soft_fmt" "$hard_fmt"
+        draw_bar "$used_mb" "$quota_mb" "$limit_mb" "$used_fmt" "$soft_fmt" "$hard_fmt" "$grace"
         
-        # Display grace period if present
-        if [ ! -z "$grace" ]; then
-            if [[ "$grace" == "none" ]]; then
-                echo -e "  ${RED}⚠ Hard limit reached - no grace period${NC}"
+        # Calculate percentage for space quota
+        local pct_soft=$(awk "BEGIN {printf \"%.1f\", ($used_mb / $quota_mb) * 100}")
+        
+        # Display grace period if present or if soft limit exceeded
+        if (( $(echo "$pct_soft >= 100" | bc -l) )); then
+            if [ -z "$grace" ]; then
+                echo -e "  ${BOLD_RED}⚠ Soft limit exceeded - grace period may have expired${NC}"
+            elif [[ "$grace" == "none" ]]; then
+                echo -e "  ${BOLD_RED}⚠ Hard limit reached - no grace period${NC}"
             elif [[ "$grace" =~ expired ]] || [[ "$grace" =~ ^0 ]]; then
-                echo -e "  ${RED}⚠ Grace period expired${NC}"
-            elif [[ "$grace" =~ [a-zA-Z] ]] || [[ "$grace" =~ [0-9] ]]; then
+                echo -e "  ${BOLD_RED}⚠ Grace period expired${NC}"
+            else
                 local formatted_grace=$(format_grace_period "$grace")
-                echo -e "  ${YELLOW}⚠ Grace period:${NC} $formatted_grace remaining"
+                echo -e "  ${ORANGE}⚠ Grace period:${NC} $formatted_grace remaining"
             fi
+        elif [ ! -z "$grace" ] && [[ ! "$grace" == "none" ]]; then
+            # Grace period present but soft limit not exceeded yet (shouldn't normally happen)
+            local formatted_grace=$(format_grace_period "$grace")
+            echo -e "  ${ORANGE}⚠ Grace period:${NC} $formatted_grace remaining"
         fi
     fi
     
@@ -263,18 +399,27 @@ parse_and_display() {
             local used_files_fmt=$(format_number "$files_num")
             local soft_files_fmt=$(format_number "$files_quota_num")
             local hard_files_fmt=$(format_number "$files_limit_num")
-            draw_bar "$files_num" "$files_quota_num" "$files_limit_num" "$used_files_fmt" "$soft_files_fmt" "$hard_files_fmt"
+            draw_bar "$files_num" "$files_quota_num" "$files_limit_num" "$used_files_fmt" "$soft_files_fmt" "$hard_files_fmt" "$files_grace"
             
-            # Display files grace period if present
-            if [ ! -z "$files_grace" ]; then
-                if [[ "$files_grace" == "none" ]]; then
-                    echo -e "  ${RED}⚠ Hard limit reached - no grace period${NC}"
+            # Calculate percentage for files quota
+            local pct_files_soft=$(awk "BEGIN {printf \"%.1f\", ($files_num / $files_quota_num) * 100}")
+            
+            # Display files grace period if present or if soft limit exceeded
+            if (( $(echo "$pct_files_soft >= 100" | bc -l) )); then
+                if [ -z "$files_grace" ]; then
+                    echo -e "  ${BOLD_RED}⚠ Soft limit exceeded - grace period may have expired${NC}"
+                elif [[ "$files_grace" == "none" ]]; then
+                    echo -e "  ${BOLD_RED}⚠ Hard limit reached - no grace period${NC}"
                 elif [[ "$files_grace" =~ expired ]] || [[ "$files_grace" =~ ^0 ]]; then
-                    echo -e "  ${RED}⚠ Grace period expired${NC}"
-                elif [[ "$files_grace" =~ [a-zA-Z] ]] || [[ "$files_grace" =~ [0-9] ]]; then
+                    echo -e "  ${BOLD_RED}⚠ Grace period expired${NC}"
+                else
                     local formatted_files_grace=$(format_grace_period "$files_grace")
-                    echo -e "  ${YELLOW}⚠ Grace period:${NC} $formatted_files_grace remaining"
+                    echo -e "  ${ORANGE}⚠ Grace period:${NC} $formatted_files_grace remaining"
                 fi
+            elif [ ! -z "$files_grace" ] && [[ ! "$files_grace" == "none" ]]; then
+                # Grace period present but soft limit not exceeded yet (shouldn't normally happen)
+                local formatted_files_grace=$(format_grace_period "$files_grace")
+                echo -e "  ${ORANGE}⚠ Grace period:${NC} $formatted_files_grace remaining"
             fi
         fi
     fi
@@ -346,11 +491,19 @@ if [ ! -z "$scratch_output" ]; then
         used=$(echo "$scratch_line" | awk '{print $2}')
         quota=$(echo "$scratch_line" | awk '{print $3}')
         limit=$(echo "$scratch_line" | awk '{print $4}')
+        grace=$(echo "$scratch_line" | awk '{print $5}')
         files=$(echo "$scratch_line" | awk '{print $6}')
         files_quota=$(echo "$scratch_line" | awk '{print $7}')
         files_limit=$(echo "$scratch_line" | awk '{print $8}')
+        files_grace=$(echo "$scratch_line" | awk '{print $9}')
         
-        parse_and_display "/mnt/scratch" "$used" "$quota" "$limit" "$files" "$files_quota" "$files_limit"
+        # Clean up grace fields (remove asterisks and handle '-' as empty)
+        [[ "$grace" == "-" ]] && grace=""
+        [[ "$files_grace" == "-" ]] && files_grace=""
+        grace=$(echo "$grace" | sed 's/[*]//g')
+        files_grace=$(echo "$files_grace" | sed 's/[*]//g')
+        
+        parse_and_display "/mnt/scratch" "$used" "$quota" "$limit" "$files" "$files_quota" "$files_limit" "$grace" "$files_grace"
     fi
 fi
 
@@ -364,23 +517,14 @@ if [ ! -z "$fastscratch_output" ]; then
         data_line=$(echo "$fastscratch_output" | grep -A1 "^/mnt/fastscratch$" | tail -n1)
         if [ ! -z "$data_line" ] && [[ ! "$data_line" =~ ^/mnt/fastscratch ]]; then
             read -r used quota limit grace files files_quota files_limit files_grace <<< "$data_line"
-            parse_and_display "/mnt/fastscratch" "$used" "$quota" "$limit" "$files" "$files_quota" "$files_limit"
-        fi
-    else
-        # Try single-line format
-        fastscratch_line=$(echo "$fastscratch_output" | grep -E "^\s*/mnt/fastscratch\s")
-        if [ -z "$fastscratch_line" ]; then
-            fastscratch_line=$(echo "$fastscratch_output" | grep "^/mnt/fastscratch")
-        fi
-        if [ ! -z "$fastscratch_line" ]; then
-            used=$(echo "$fastscratch_line" | awk '{print $2}')
-            quota=$(echo "$fastscratch_line" | awk '{print $3}')
-            limit=$(echo "$fastscratch_line" | awk '{print $4}')
-            files=$(echo "$fastscratch_line" | awk '{print $6}')
-            files_quota=$(echo "$fastscratch_line" | awk '{print $7}')
-            files_limit=$(echo "$fastscratch_line" | awk '{print $8}')
             
-            parse_and_display "/mnt/fastscratch" "$used" "$quota" "$limit" "$files" "$files_quota" "$files_limit"
+            # Clean up grace fields
+            [[ "$grace" == "-" ]] && grace=""
+            [[ "$files_grace" == "-" ]] && files_grace=""
+            grace=$(echo "$grace" | sed 's/[*]//g')
+            files_grace=$(echo "$files_grace" | sed 's/[*]//g')
+            
+            parse_and_display "/mnt/fastscratch" "$used" "$quota" "$limit" "$files" "$files_quota" "$files_limit" "$grace" "$files_grace"
         fi
     fi
 fi
@@ -389,25 +533,52 @@ fi
 if [ -d "/mnt/fastscratch2/users/$uname" ]; then
     fastscratch2_output=$(lfs quota -h -u $uname /mnt/fastscratch2 2>/dev/null)
     if [ ! -z "$fastscratch2_output" ]; then
-        fastscratch2_line=$(echo "$fastscratch2_output" | grep -E "^\s*/mnt/fastscratch2")
-        if [ -z "$fastscratch2_line" ]; then
-            fastscratch2_line=$(echo "$fastscratch2_output" | grep "^/mnt/fastscratch2")
-        fi
-        if [ ! -z "$fastscratch2_line" ]; then
-            used=$(echo "$fastscratch2_line" | awk '{print $2}')
-            quota=$(echo "$fastscratch2_line" | awk '{print $3}')
-            limit=$(echo "$fastscratch2_line" | awk '{print $4}')
-            files=$(echo "$fastscratch2_line" | awk '{print $6}')
-            files_quota=$(echo "$fastscratch2_line" | awk '{print $7}')
-            files_limit=$(echo "$fastscratch2_line" | awk '{print $8}')
-            
-            parse_and_display "/mnt/fastscratch2" "$used" "$quota" "$limit" "$files" "$files_quota" "$files_limit"
+        # Check if filesystem name is on its own line (no data after it)
+        fs_line=$(echo "$fastscratch2_output" | grep "^/mnt/fastscratch2$")
+
+        if [ ! -z "$fs_line" ]; then
+            # Filesystem name is on its own line, data is on the next line
+            # Get the line after the filesystem line and trim leading whitespace
+            data_line=$(echo "$fastscratch2_output" | grep -A1 "^/mnt/fastscratch2$" | tail -n1 | sed 's/^[[:space:]]*//')
+            if [ ! -z "$data_line" ] && [[ ! "$data_line" =~ ^/mnt/fastscratch2 ]]; then
+                # Parse the trimmed data line
+                read -r used quota limit grace files files_quota files_limit files_grace <<< "$data_line"
+
+                # Clean up grace fields
+                [[ "$grace" == "-" ]] && grace=""
+                [[ "$files_grace" == "-" ]] && files_grace=""
+                grace=$(echo "$grace" | sed 's/[*]//g')
+                files_grace=$(echo "$files_grace" | sed 's/[*]//g')
+
+                parse_and_display "/mnt/fastscratch2" "$used" "$quota" "$limit" "$files" "$files_quota" "$files_limit" "$grace" "$files_grace"
+            fi
+        else
+            # Try to find data on same line as filesystem (with leading whitespace and data)
+            fastscratch2_line=$(echo "$fastscratch2_output" | grep -E "^\s*/mnt/fastscratch2\s+[0-9]")
+            if [ ! -z "$fastscratch2_line" ]; then
+                # Data is on the same line as the filesystem name
+                used=$(echo "$fastscratch2_line" | awk '{print $2}')
+                quota=$(echo "$fastscratch2_line" | awk '{print $3}')
+                limit=$(echo "$fastscratch2_line" | awk '{print $4}')
+                grace=$(echo "$fastscratch2_line" | awk '{print $5}')
+                files=$(echo "$fastscratch2_line" | awk '{print $6}')
+                files_quota=$(echo "$fastscratch2_line" | awk '{print $7}')
+                files_limit=$(echo "$fastscratch2_line" | awk '{print $8}')
+                files_grace=$(echo "$fastscratch2_line" | awk '{print $9}')
+
+                # Clean up grace fields
+                [[ "$grace" == "-" ]] && grace=""
+                [[ "$files_grace" == "-" ]] && files_grace=""
+                grace=$(echo "$grace" | sed 's/[*]//g')
+                files_grace=$(echo "$files_grace" | sed 's/[*]//g')
+
+                parse_and_display "/mnt/fastscratch2" "$used" "$quota" "$limit" "$files" "$files_quota" "$files_limit" "$grace" "$files_grace"
+            fi
         fi
     fi
 fi
 
 echo ""
 echo -e "${BOLD}Legend:${NC} ${GREEN}█${NC} Used space  ${YELLOW}┃${NC} Soft limit  ${RED}┃${NC} Hard limit  ░ Available"
-echo -e "         ${GREEN}█${NC} < 75% of soft  ${ORANGE}█${NC} 75-99% of soft  ${RED}█${NC} ≥ 100% of soft (exceeded)"
+echo -e "         ${GREEN}█${NC} < 75% of soft  ${ORANGE}█${NC} ≥ 75% of soft (warning/exceeded)"
 echo -e "         Grace periods are 7 days, unless otherwise specified."
-echo ""
