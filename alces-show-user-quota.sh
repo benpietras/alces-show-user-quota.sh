@@ -13,7 +13,6 @@ CYAN='\033[0;36m'
 NC='\033[0m' # No Color
 BOLD='\033[1m'
 BOLD_RED='\033[1;31m'
-
 msg="\
 Usage: $(basename $0) [user]
 Display the disk usage quotas on NFS and Lustre file systems for the specified user.
@@ -21,16 +20,13 @@ Examples could be:
 $(basename $0)
 $(basename $0) testuser
 "
-
 if [ "$#" -gt 1 ]; then
     echo "Error: Illegal number of arguments, exiting" >&2
     echo "$msg"
     exit 1
 fi
-
 currentuser=$USER
 uname=${1:-$currentuser}
-
 # Check if user exists
 if id "$uname" &>/dev/null; then
     echo -e "${BOLD}Display the disk usage quotas on NFS and Lustre file systems for user $uname.${NC}"
@@ -39,7 +35,6 @@ else
     echo "$msg"
     exit 1
 fi
-
 # Function to convert file count notation to numbers (handles k, M suffixes)
 convert_to_number() {
     local value=$1
@@ -52,7 +47,6 @@ convert_to_number() {
         *) echo "$num" ;;
     esac
 }
-
 # Function to convert human-readable sizes to MB
 convert_to_mb() {
     local size=$1
@@ -67,7 +61,6 @@ convert_to_mb() {
         *) echo "0" ;;
     esac
 }
-
 # Function to format grace period with units
 format_grace_period() {
     local grace=$1
@@ -135,7 +128,6 @@ format_grace_period() {
     # If format is not recognized, just add space between number and letters
     echo "$grace" | sed 's/\([0-9]\)\([a-zA-Z]\)/\1 \2/'
 }
-
 # Function to check if quotas match defaults
 check_default_quotas() {
     local filesystem=$1
@@ -223,7 +215,6 @@ check_default_quotas() {
         echo "custom"
     fi
 }
-
 # Function to draw a usage bar
 draw_bar() {
     local used=$1
@@ -301,7 +292,6 @@ draw_bar() {
     echo -e " ${pct_soft}% of soft limit (${pct_hard}% of hard limit)"
     echo -e "  ${CYAN}Used:${NC} $label  ${YELLOW}Soft:${NC} $soft_label  ${RED}Hard:${NC} $hard_label"
 }
-
 # Function to format size value for display (MB input)
 format_size_mb() {
     local size_mb=$1
@@ -313,7 +303,6 @@ format_size_mb() {
         echo "$(awk "BEGIN {printf \"%.1f\", $size_mb / 1048576}")T"
     fi
 }
-
 # Function to format number for display (for files/inodes)
 format_number() {
     local num=$1
@@ -325,7 +314,6 @@ format_number() {
         echo "$(awk "BEGIN {printf \"%.1f\", $num / 1000000}")M"
     fi
 }
-
 # Function to parse and display quota info with bars
 parse_and_display() {
     local filesystem=$1
@@ -424,12 +412,10 @@ parse_and_display() {
         fi
     fi
 }
-
 echo ""
 echo -e "${BOLD}${CYAN}═══════════════════════════════════════════════════════════════${NC}"
 echo -e "${BOLD}${CYAN}  NFS File Systems${NC}"
 echo -e "${BOLD}${CYAN}═══════════════════════════════════════════════════════════════${NC}"
-
 # Capture and parse NFS quota output
 nfs_output=$(quota -s -u $uname 2>/dev/null)
 fs=""
@@ -477,12 +463,10 @@ while IFS= read -r line; do
         fs=""
     fi
 done <<< "$(echo "$nfs_output" | tail -n +3)"
-
 echo ""
 echo -e "${BOLD}${CYAN}═══════════════════════════════════════════════════════════════${NC}"
 echo -e "${BOLD}${CYAN}  Lustre File Systems${NC}"
 echo -e "${BOLD}${CYAN}═══════════════════════════════════════════════════════════════${NC}"
-
 # Process /mnt/scratch
 scratch_output=$(lfs quota -h -u $uname /mnt/scratch 2>/dev/null)
 if [ ! -z "$scratch_output" ]; then
@@ -502,11 +486,13 @@ if [ ! -z "$scratch_output" ]; then
         [[ "$files_grace" == "-" ]] && files_grace=""
         grace=$(echo "$grace" | sed 's/[*]//g')
         files_grace=$(echo "$files_grace" | sed 's/[*]//g')
+        # Clean up used/files fields
+        used=$(echo "$used" | sed 's/[*+]//g')
+        files=$(echo "$files" | sed 's/[*+]//g')
         
         parse_and_display "/mnt/scratch" "$used" "$quota" "$limit" "$files" "$files_quota" "$files_limit" "$grace" "$files_grace"
     fi
 fi
-
 # Process /mnt/fastscratch
 fastscratch_output=$(lfs quota -h -u $uname /mnt/fastscratch 2>/dev/null)
 if [ ! -z "$fastscratch_output" ]; then
@@ -518,6 +504,9 @@ if [ ! -z "$fastscratch_output" ]; then
         if [ ! -z "$data_line" ] && [[ ! "$data_line" =~ ^/mnt/fastscratch ]]; then
             read -r used quota limit grace files files_quota files_limit files_grace <<< "$data_line"
             
+            # Clean up used/files fields (strip * and + markers)
+            used=$(echo "$used" | sed 's/[*+]//g')
+            files=$(echo "$files" | sed 's/[*+]//g')
             # Clean up grace fields
             [[ "$grace" == "-" ]] && grace=""
             [[ "$files_grace" == "-" ]] && files_grace=""
@@ -528,14 +517,12 @@ if [ ! -z "$fastscratch_output" ]; then
         fi
     fi
 fi
-
 # Check if fastscratch2 exists
 if [ -d "/mnt/fastscratch2/users/$uname" ]; then
     fastscratch2_output=$(lfs quota -h -u $uname /mnt/fastscratch2 2>/dev/null)
     if [ ! -z "$fastscratch2_output" ]; then
         # Check if filesystem name is on its own line (no data after it)
         fs_line=$(echo "$fastscratch2_output" | grep "^/mnt/fastscratch2$")
-
         if [ ! -z "$fs_line" ]; then
             # Filesystem name is on its own line, data is on the next line
             # Get the line after the filesystem line and trim leading whitespace
@@ -543,13 +530,14 @@ if [ -d "/mnt/fastscratch2/users/$uname" ]; then
             if [ ! -z "$data_line" ] && [[ ! "$data_line" =~ ^/mnt/fastscratch2 ]]; then
                 # Parse the trimmed data line
                 read -r used quota limit grace files files_quota files_limit files_grace <<< "$data_line"
-
+                # Clean up used/files fields (strip * and + markers)
+                used=$(echo "$used" | sed 's/[*+]//g')
+                files=$(echo "$files" | sed 's/[*+]//g')
                 # Clean up grace fields
                 [[ "$grace" == "-" ]] && grace=""
                 [[ "$files_grace" == "-" ]] && files_grace=""
                 grace=$(echo "$grace" | sed 's/[*]//g')
                 files_grace=$(echo "$files_grace" | sed 's/[*]//g')
-
                 parse_and_display "/mnt/fastscratch2" "$used" "$quota" "$limit" "$files" "$files_quota" "$files_limit" "$grace" "$files_grace"
             fi
         else
@@ -565,19 +553,19 @@ if [ -d "/mnt/fastscratch2/users/$uname" ]; then
                 files_quota=$(echo "$fastscratch2_line" | awk '{print $7}')
                 files_limit=$(echo "$fastscratch2_line" | awk '{print $8}')
                 files_grace=$(echo "$fastscratch2_line" | awk '{print $9}')
-
+                # Clean up used/files fields (strip * and + markers)
+                used=$(echo "$used" | sed 's/[*+]//g')
+                files=$(echo "$files" | sed 's/[*+]//g')
                 # Clean up grace fields
                 [[ "$grace" == "-" ]] && grace=""
                 [[ "$files_grace" == "-" ]] && files_grace=""
                 grace=$(echo "$grace" | sed 's/[*]//g')
                 files_grace=$(echo "$files_grace" | sed 's/[*]//g')
-
                 parse_and_display "/mnt/fastscratch2" "$used" "$quota" "$limit" "$files" "$files_quota" "$files_limit" "$grace" "$files_grace"
             fi
         fi
     fi
 fi
-
 echo ""
 echo -e "${BOLD}Legend:${NC} ${GREEN}█${NC} Used space  ${YELLOW}┃${NC} Soft limit  ${RED}┃${NC} Hard limit  ░ Available"
 echo -e "         ${GREEN}█${NC} < 75% of soft  ${ORANGE}█${NC} ≥ 75% of soft (warning/exceeded)"
